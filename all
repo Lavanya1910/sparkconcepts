@@ -1,0 +1,389 @@
+Scenario-Based Questions in Projects DataArchitectStudio 
+Scenario-Based Questions in Projects 
+Common scenario questions interviewers ask once you finish explaining your project. 
+Each answer is based on the Retail Sales Analytics Platform (Azure Databricks, Medallion architecture). Keep answers conversational — 60 to 90 seconds each. 
+1. How Do You Handle Schema Evolution? 
+What they are really asking: If a source adds/removes/renames a column tomorrow, does your pipeline break or handle it gracefully? 
+Key Points to Cover 
+• How you detect schema changes 
+• What Delta Lake does automatically vs. what you control 
+• Different evolution scenarios and how each is handled 
+• How you communicate changes to downstream consumers 
+Example Answer 
+Schema evolution is something we handled at multiple layers depending on the type of change. 
+Adding a new column (most common): 
+We use mergeSchema = true in our Delta writes. So if the POS system adds a new column like discount_code, Spark automatically adds it to the Delta table schema on the next run. Old partitions show null for that column, new ones have the value. No pipeline failure, no manual intervention. 
+Renaming or removing a column: 
+This is more dangerous. We treat this as a breaking change. Our ingestion notebooks validate the incoming schema against a registered "expected schema" stored in a control table. If a column disappears, the job fails fast with a clear error message — it does not silently produce wrong data. We then raise a ticket, update the schema registry, and re-run. 
+Data type change (e.g., amount goes from INT to DECIMAL): 
+Delta Lake does not allow implicit type widening in all cases. We handle this by casting explicitly in the Silver transformation — so even if the source changes the type, our Silver logic normalises it before writing. We have unit tests that catch type mismatches on the fixture data. 
+Communication to downstream: 
+Any schema change to a Gold table triggers a Slack/Teams notification to the BI team so they know their Power BI reports may need updates. 
+
+
+
+
+2. How Do You Add Data Quality Checks? 
+What they are really asking: How do you ensure the data you are writing is actually correct, not just present?  
+Scenario-Based Questions in Projects DataArchitectStudio 
+Key Points to Cover 
+• Where in the pipeline DQ checks sit (Bronze, Silver, Gold) 
+• What you check (nulls, ranges, referential integrity, row counts) 
+• What happens when a check fails (stop vs. quarantine vs. alert) 
+• Tools or frameworks used 
+Example Answer 
+We apply data quality checks at two layers — Bronze and Silver. 
+At Bronze (structural checks): 
+We validate that the file has the expected columns and that mandatory fields like transaction_id and store_id are not null. If the file is structurally broken, we reject the entire file and log it to a rejected_files table with a reason. The pipeline continues with other files. 
+At Silver (business rule checks): 
+This is where the real DQ logic lives. We check: 
+• transaction_amount must be > 0 and < 1,000,000 (sanity range) 
+• transaction_date must be within the last 90 days (late-arriving data threshold) 
+• store_id must exist in the store_master reference table (referential integrity) 
+• Row count of Silver output must be >= 90% of Bronze input (no silent data loss) 
+Records that fail any of these checks go to a rejected_records Delta table with the exact rule that failed. The main pipeline continues with clean records — we do not stop the whole run for bad rows. 
+At Gold (aggregate checks): 
+We run a post-load assertion — if daily_sales_summary for today's date shows total revenue that is more than 3x or less than 30% of the 7-day average, we flag it as a data quality anomaly and alert the team, even if the job technically succeeded. 
+For the framework, we use a mix of custom PySpark assertions and great_expectations for the more complex rule sets. 
+
+
+
+
+
+
+
+
+
+3. How Do You Backfill Data — Full Historical or Time-Defined? 
+What they are really asking: If something went wrong for the last 30 days, or if you need to load 3 years of history, how do you do it without breaking things? 
+Key Points to Cover 
+• Full historical backfill approach 
+• Partial / time-range backfill 
+• How you avoid duplicates during re-processing 
+• Performance considerations for large backfills 
+Example Answer Scenario-Based Questions in Projects DataArchitectStudio 
+We have two backfill scenarios — full historical load and partial date-range backfill. 
+Full historical backfill (e.g., first-time load or complete rebuild): 
+We parameterise our pipelines with a start_date and end_date. For a full backfill, we pass start_date = 1900-01-01 (or the actual earliest date in the source) and end_date = today. The ingestion job processes data in daily or weekly chunks using a loop — we never try to load everything in one giant Spark job, as that causes memory and shuffle issues. 
+the history is untouched. This makes the backfill safe to re-run if it fails halfway. 
+Partial / time-range backfill (e.g., fix the last 30 days): 
+We have a utility notebook called backfill_runner that accepts start_date and end_date as widgets. It queries the audit control table to identify which batch IDs to reprocess and triggers Silver and Gold jobs only for those date partitions. Bronze is skipped if the raw files are already in the landing zone. 
+Avoiding duplicates: 
+All Gold writes use MERGE INTO keyed on business keys + date. So running the backfill twice produces the same result — updates in place, no duplicates. 
+Performance: 
+For large historical backfills (like 2+ years), we increase the cluster to a larger auto-scaling range and run the backfill over a weekend to avoid competing with production workloads. We also enable Delta's OPTIMIZE and ZORDER after the backfill completes to restore query performance. 
+4. What Are the Strategies Available for CDC Loads? 
+What they are really asking: How do you capture and process only changed data from source systems instead of reloading everything every time? 
+Key Points to Cover 
+• Watermark / high-watermark approach 
+• Database CDC (log-based) using tools like Debezium 
+• Full load with deduplication 
+• Soft deletes vs. hard deletes handling 
+Example Answer Scenario-Based Questions in Projects DataArchitectStudio 
+We used three different CDC strategies in our project depending on the source system's capabilities. Strategy 1 — Watermark / High-watermark (most common): 
+For SQL Server (POS) and Oracle (ERP), we track the last successfully loaded max(updated_at) or max(transaction_date) in an audit control table. On each run, we query WHERE updated_at > last_watermark. Simple, reliable, and works without any source-side changes. The risk is if a record gets updated with a backdated timestamp — we would miss it. We mitigated this with a small overlap window (we go back 15 minutes before the watermark to catch late updates). 
+Strategy 2 — Log-based CDC (Debezium / Kafka): 
+For a real-time stream we added later, we used Debezium to read the Oracle redo log and publish INSERT, UPDATE, DELETE events to Kafka topics. Spark Structured Streaming consumed these topics and applied them to our Delta Silver tables using MERGE INTO. This is the most accurate CDC method — captures every change including deletes — but it requires DBA access to enable log mining on the source. 
+Strategy 3 — Full load with deduplication: 
+For smaller reference tables like store_master (< 50K rows), we do a full load every night and use MERGE INTO to apply changes. Cheaper to implement than CDC, and the small table size means it's fast enough. 
+Handling deletes: 
+For soft deletes (source sets is_deleted = true), we propagate the flag through to Silver and filter them out at Gold. For hard deletes (row physically removed from source), we only catch them with log-based CDC. Watermark-based approaches do not see hard deletes — we documented this as a known limitation. 
+5. How Do You Make Your Pipeline More Scalable? 
+What they are really asking: If data volume doubles or triples, does your pipeline still work or does it fall over? 
+Key Points to Cover 
+• Auto-scaling compute 
+• Incremental processing (avoid full scans) 
+• Partitioning strategy 
+• Parallelism tuning 
+• Design choices that allow horizontal scaling 
+Example Answer  
+Scenario-Based Questions in Projects DataArchitectStudio 
+Scalability was a first-class concern in our design. Here is how we addressed it at each level. Compute — auto-scaling clusters: 
+Our Databricks Job Cluster scales from 4 to 12 workers automatically. During a Black Friday data spike (3x normal volume), the cluster scaled up without any manual intervention and the pipeline still completed within SLA. 
+Incremental processing: 
+the new daily slice. So even as the total table grows to years of history, each individual run touches the same small volume. 
+Partitioning: 
+All Silver and Gold tables are partitioned by sale_date. Queries from Power BI only scan the relevant date partition — they never full-scan a 3-year table. We also apply ZORDER BY (store_id, product_id) on the Gold tables for fast filtered reads. 
+Parallel ingestion: 
+The three ingestion jobs (POS, ERP, CRM) run in parallel in the Databricks Workflow DAG. We do not run them sequentially, so ingestion time is bounded by the slowest source, not the sum of all three. 
+File batching at ingestion: 
+The Step Functions workflow groups pending files into configurable batches and launches multiple Glue/Spark jobs in parallel. If we get 5,000 files instead of 500, we just spin up more parallel jobs — the design is horizontally scalable by nature. 
+What would break at extreme scale: 
+The MERGE INTO operation on very large Gold tables can become expensive. At high scale we would consider partitioned merges — merging one date partition at a time rather than the full table. 
+6. How Can You Prove That Your Pipeline Is More Secure? 
+What they are really asking: Walk me through your actual security controls — not just "we used Key Vault". 
+Key Points to Cover 
+• Secret management (no hardcoded credentials) 
+• Authentication and access control (RBAC, managed identity) 
+• Network security (VNet, private endpoints) 
+• Data-level security (column masking, row-level security) 
+• Audit trail 
+Scenario-Based Questions in Projects DataArchitectStudio 
+I can walk through this at four levels — secrets, access, network, and data. 
+Secrets — zero hardcoded credentials: 
+Every credential (DB passwords, API tokens, storage account keys) is stored in Azure Key Vault. Databricks accesses them via a Service Principal with the Key Vault Reader role. There is literally no password or key anywhere in the codebase. We enforce this with a pre-commit hook that scans for common secret patterns and blocks the commit if any are found. 
+Access control — principle of least privilege: 
+Storage access uses Azure Managed Identity — no storage account keys are exposed. RBAC is applied at each layer: 
+• Bronze: only the ingestion service principal can write here. Analysts have no access. 
+• Silver: data engineers can read/write. Analysts cannot. 
+• Gold: read-only for the BI team and analysts. They cannot see raw or PII data. 
+Network — no public exposure: 
+The Databricks workspace is deployed inside an Azure VNet with private endpoints. The ADLS Gen2 storage account has public network access disabled — it only accepts connections from within the VNet. There is no way to access the data from the public internet. 
+Data-level — PII handling: 
+PII columns from the CRM (customer email, phone number, SSN) are SHA-256 hashed at the Silver layer. The original values never reach Gold. Analysts only ever see hashed values. 
+Audit trail: 
+Delta Lake maintains a full transaction log — every write, merge, and delete is recorded. Azure Monitor captures all Databricks workspace activity. We can answer "who accessed what data and when" for any compliance audit. 
+7. How Do You Handle PII or Sensitive Data? 
+What they are really asking: Do you have a concrete strategy, or did you just "mask some columns"? 
+Key Points to Cover 
+• What counts as PII in your project 
+• Where masking/hashing happens in the pipeline 
+• Tokenisation vs. hashing vs. encryption 
+• Access controls around raw PII 
+• Compliance alignment (GDPR, CCPA, etc.) 
+Scenario-Based Questions in Projects DataArchitectStudio 
+We had three categories of sensitive data — customer PII, financial data, and employee data. Identification of PII: 
+We worked with the data governance team to tag PII columns in the AWS Glue / Databricks Unity Catalog. Any column tagged as PII is automatically subject to masking rules. This gives us a central registry — if a new PII column is added to a source table, it gets tagged and the masking applies automatically on the next schema refresh. 
+Masking approach: 
+For columns like customer email and phone number — we use SHA-256 one-way hashing at the Silver layer. The hash is deterministic, so you can still join tables on the hashed value (e.g., count loyalty points per customer) without exposing the actual email. The raw value is never written to Silver or Gold. For financial account numbers — we use format-preserving tokenisation. The token looks like a real account number (same length, same format) so existing downstream systems do not break, but it is meaningless outside the tokenisation service. 
+Access to raw PII: 
+The Bronze layer (where raw PII exists) is restricted to the ingestion service principal and the DBA team only. Data engineers work with Silver and Gold where PII is already masked. We have zero exceptions to this — even the data engineering lead cannot read Bronze in production without going through an access request workflow. 
+Compliance: 
+For GDPR right-to-erasure requests, we have a documented process — we identify the customer's hashed key, delete or overwrite all records with that key in Silver and Gold using Delta Lake's DELETE operation, and run VACUUM to remove the physical files. We tested this process and it completes in under 2 hours for a single customer. 
+8. What Are the Different Strategies to Read JDBC or Tabular Data? 
+What they are really asking: Do you just do spark.read.jdbc(...) and hope for the best, or do you know how to tune it for large tables? 
+Key Points to Cover 
+• Single partition read (simple, slow for large tables) 
+• Multi-partition read using numPartitions + partitionColumn 
+• Predicate pushdown 
+• Incremental vs. full load 
+• Connection pooling and driver considerations 
+Scenario-Based Questions in Projects DataArchitectStudio 
+Reading from JDBC sources at scale has several gotchas. Here is how we approach it. 
+Strategy 1 — Single partition (default, only for small tables): 
+spark.read.jdbc(url, table, properties) opens a single JDBC connection and reads everything sequentially. Fine for the store_master table (50K rows) but completely unsuitable for sales_transactions (2M rows/day). All the data would flow through one executor — no parallelism. 
+Strategy 2 — Multi-partition read (our main approach for large tables): 
+We use partitionColumn, lowerBound, upperBound, and numPartitions to split the read across multiple o
+parallel JDBC connections. Spark creates numPartitions tasks, each reading a range of the partition column. We typically use a numeric ID or a date column as the partition column. For our POS transactions, we partition on transaction_id with 20 partitions — Spark opens 20 parallel connections to SQL Server and reads in parallel. 
+Strategy 3 — Predicate pushdown for incremental loads: 
+We always pass a WHERE clause using the predicates parameter or via a query string — (SELECT * FROM transactions WHERE transaction_date = '2024-01-15') AS t. This pushes the filter down to the database — the database does the filtering, not Spark. Only the relevant rows travel over the network. 
+Strategy 4 — Fetch size tuning: 
+By default the JDBC fetch size is very small (often 10 rows per round trip). We set fetchsize = 10000 in the JDBC properties. This dramatically reduces round trips and speeds up the read. 
+Strategy 5 — Using database views or stored procedures: 
+For complex joins or business logic that is cheaper to run on the source DB, we read from a pre-built database view rather than joining multiple tables in Spark. The DB does what it is good at, Spark does what it is good at. 
+Driver and connection pool considerations: 
+We stage the JDBC driver JAR on the cluster init script. For Oracle, we use the thin driver (ojdbc8.jar). We also set connection timeout and retry settings in the JDBC properties to handle transient source DB unavailability without crashing the job. 
+9. What Are Your Steps for Debugging a Production Job with Minimum Downtime? 
+What they are really asking: Do you have a structured approach, or do you just randomly poke at things and hope the problem goes away? 
+Key Points to Cover 
+• First response (check logs, not the code) 
+• Isolation (which step failed, not the whole pipeline) 
+• Root cause categories (data issue, resource issue, code issue, dependency issue) 
+• Fix and re-run strategy 
+• Post-mortem 
+Example Answer 
+Scenario-Based Questions in Projects DataArchitectStudio 
+We follow a structured 5-step approach to minimise the time users are impacted. 
+Step 1 — Triage (2 minutes): 
+Check the Databricks Workflows UI and the audit log table immediately. We look at: which specific task failed, at what step, what was the error message, and how many records were processed before failure. This tells us instantly whether it is a data issue (e.g., bad file), an infrastructure issue (e.g., driver OOM), or a code issue (e.g., null pointer in a transformation). 
+Step 2 — Isolate (5 minutes): 
+We never re-run the full pipeline blindly. We identify the exact failed task (e.g., silver_transform_pos) and check the Spark UI for the failed stage — the error message at the executor level is usually more specific than the driver-level error. We also check Log Analytics for the full stack trace. 
+Step 3 — Categorise and fix: 
+• Data issue (e.g., a file with an unexpected format): Fix the file or add it to a quarantine list and re-run. Pipeline continues without that file. 
+• Resource issue (e.g., OOM, shuffle spill): Increase driver memory or shuffle partitions in the job config and re-trigger. 
+• Dependency issue (e.g., upstream source was late): Just re-trigger once the dependency is resolved. No code change needed. 
+• Code issue (e.g., logic bug on an edge case): Fix in a feature branch, test locally with a small reproduction dataset, deploy to prod via the normal CI/CD pipeline — or, if time-critical, use a hotfix branch with expedited approval. 
+Step 4 — Re-run safely: 
+Because our jobs are idempotent, we re-run only the failed task and the downstream tasks — not the entire pipeline. The audit control table tracks where we left off, so we never reprocess what already succeeded. 
+Step 5 — Post-mortem: 
+For any failure that caused an SLA breach, we write a brief post-mortem: root cause, timeline, fix applied, and what we are adding to prevent recurrence (a new DQ check, a better error message, an alert threshold). This goes into Confluence so the whole team learns from it. 
+10. Explain Some Production Issues You Have Seen and How You Solved Them 
+What they are really asking: Have you actually operated a real pipeline, or is this all theoretical? 
+Key Points to Cover 
+• 2 to 3 concrete real-sounding issues 
+• Specific error symptoms 
+• How you diagnosed it 
+• What the fix was 
+• What you changed to prevent recurrence 
+Example Answer 
+Scenario-Based Questions in Projects DataArchitectStudio 
+Here are three real issues we dealt with in production. 
+Issue 1 — Salesforce API token expiry causing silent partial loads: 
+The CRM ingestion job was completing without errors, but we noticed the customer record count was lower than expected. The API token had expired mid-run — Salesforce was returning HTTP 401 for the latter pages of results, but our error handling was catching the exception and logging it at WARNING level, not ERROR. The job finished but only loaded the first few pages. 
+job. Added a row count check that compares today's ingested count against the 7-day average. Now if count drops by more than 20%, the job is flagged even if it completes. 
+Issue 2 — Delta MERGE causing OOM on the Gold layer: 
+Three months after go-live, the daily MERGE INTO daily_sales_summary started timing out and crashing with OutOfMemory on the driver. The Gold table had grown to 18 months of data and the MERGE was scanning the full table. 
+Fix: We switched to a partitioned merge — instead of merging the full table, we added WHEN sale_date = current_date() to the MERGE condition. This tells Delta to only scan and merge the relevant date partition. Job time dropped from 45 minutes back to 8 minutes. We also ran OPTIMIZE and ZORDER on the table to clean up small files that had accumulated. 
+Issue 3 — Source SQL Server timeout during business hours: 
+The POS ingestion job ran at midnight but one day it was retriggered manually at 2 PM (after a failure). The JDBC read timed out because the source SQL Server was under heavy load from business users during the day. 
+Fix: Added a JDBC queryTimeout = 300 and loginTimeout = 60 property, and configured 3 automatic retries with a 15-minute backoff. Also added a check — if the current time is between 8 AM and 6 PM, the manual re-trigger sends a warning alert before proceeding so the on-call engineer is aware it may impact source DB performance. 
+11. What Are the Limitations of Your Project? 
+What they are really asking: Are you self-aware enough to know where your solution breaks down, or do you think it is perfect? 
+Key Points to Cover 
+• Known technical limitations 
+• Scale limits 
+• Architectural trade-offs 
+• Things you would change with more time/budget 
+Example Answer 
+Scenario-Based Questions in Projects DataArchitectStudio 
+We are transparent about our limitations — knowing them is as important as knowing the strengths. 1. Watermark-based CDC does not catch hard deletes: 
+If a record is physically deleted from the source SQL Server, we have no way to detect it with watermark-based ingestion. The record stays in our Silver and Gold tables permanently. We documented this and the business accepted it — most of their "deletes" are soft deletes (a flag is set). For true hard-delete compliance we would need log-based CDC like Debezium. 
+2. MERGE performance degrades at very large scale: 
+Example Answer o
+Our MERGE INTO on Gold tables works well up to about 2 years of data. Beyond that, even with partitioned merges, the operation slows down. At 5+ years of history we would need to archive older partitions to a cold storage tier and only keep rolling 2 years in the active Gold table. 
+3. No real-time capability: 
+The pipeline is batch-only — daily refresh. If the business ever needs intraday or real-time analytics, the architecture would need a significant change — introducing Kafka and Spark Structured Streaming. The current design was built for daily batch and is not easily extensible to sub-hourly without rebuilding the ingestion layer. 
+4. Databricks Workflows is not a full orchestration tool: 
+For simple linear DAGs it works well. But for complex, cross-pipeline dependencies (e.g., Pipeline B in Domain 2 depends on Pipeline A in Domain 1 finishing) we had to build our own dependency tracking in the Aurora control table. A dedicated tool like Apache Airflow would handle this more elegantly. 
+5. Cost visibility is limited at the domain level: 
+We can see total cluster costs but cannot easily break down costs per domain or per pipeline. This makes it hard to do accurate chargeback to individual business units. 
+12. What Are Your Data Lifecycle Policies and How Did You Implement Them? 
+What they are really asking: Do you just accumulate data forever, or do you have a plan for what happens to old data? 
+Key Points to Cover 
+• Retention policy per layer (Bronze/Silver/Gold) 
+• How deletion is implemented (Delta DELETE + VACUUM) 
+• Archival to cold storage 
+• Compliance-driven retention (GDPR 7-year financial records, etc.) 
+We have a tiered retention policy, different per layer, driven by both compliance requirements and cost. Bronze (raw data) — 90 days: 
+Raw files are business-critical for re-processing but expensive to store long-term. We retain the last 90 days of raw files in ADLS Gen2 hot tier. After 90 days, an Azure Lifecycle Management policy automatically moves files to the cool tier (cheaper) and deletes them at 180 days. This is automated — no manual cleanup needed. 
+Silver (cleaned data) — 3 years: 
+Silver tables are retained for 3 years in active Delta format. After 3 years, we run OPTIMIZE to compact them, o
+then move the Parquet files to the cold tier. The Delta log is retained so time-travel queries still work for audit purposes. 
+Gold (aggregated/business data) — 7 years: 
+Financial regulations require us to retain aggregated sales data for 7 years. Gold tables stay in hot/cool tier for 2 years of active querying, then move to the cold archive tier. We use Delta's shallow clone to create a lightweight reference to the archived data without duplicating storage. 
+Delta transaction log retention: 
+By default Delta retains 30 days of transaction log. We increased this to 90 days for Silver and Gold (delta.logRetentionDuration = interval 90 days) to support longer time-travel windows for audits. 
+Implementation: 
+• Azure Lifecycle Management policies handle the automated tier transitions 
+• A weekly Databricks job runs VACUUM on all tables with the appropriate retention period to clean up old file versions 
+• Compliance-triggered deletions (GDPR erasure) are handled manually via a documented runbook and verified by the data governance team before execution 
+13. How Do You Check Reconciliation, Scalability, Availability, Logging, Monitoring, and Security? 
+What they are really asking: Give me your operational checklist — how do you know the system is healthy? 
+How We Check Each 
+Reconciliation: 
+• After each pipeline run, we compare row counts between layers: Bronze count ≥ Silver count (dedup is acceptable loss) and Silver count = Gold aggregate base count 
+• For financial data: we cross-check sum(transaction_amount) in Silver against the source system's daily total — tolerance is ±0.01% 
+• Any reconciliation failure is logged to the audit table and alerts fire before business users see the data Scalability: 
+• Monthly review of job duration trends — if average job time increases by >20% month over month, we investigate (usually small file problem or partition skew) 
+• We test scalability by running the pipeline against a synthetic dataset that is 3x normal volume in a QA environment before any major change 
+• Auto-scaling metrics reviewed quarterly — if the cluster hits max workers regularly, we raise the ceiling Availability: rio-Based Questions in Projects DataArchitectStudio 
+• SLA dashboard on Power BI shows daily pipeline completion vs. 7 AM target for the last 30 days • On-call rotation means someone is always watching alerts during business hours 
+• Dependency health: if a source system is unavailable, the pipeline retries 3 times and alerts — it does not silently produce empty data 
+Logging: 
+• Every notebook writes JSON to control.pipeline_audit_log — job name, layer, rows in, rows out, rejected, duration, status 
+• Logs are queryable via Databricks SQL — no need to dig through log files 
+• Log retention: 90 days in the Delta table, then archived to ADLS cold tier 
+Monitoring: 
+• Power BI ops dashboard: job duration trends, row count trends, rejection rates, SLA compliance — updated daily 
+• Azure Monitor: cluster CPU, memory, and auto-scaling events 
+• Custom alert: if rejection rate > 5% or row count drops > 10% from 7-day average, alert fires regardless of job status 
+Security: 
+• Monthly access review: pull a list of all service principals and users with access to each storage container and compare against the approved list 
+• Key rotation: Azure Key Vault secrets are rotated every 90 days via an automated rotation policy • Penetration testing: annual test by the security team covering the VNet, private endpoints, and RBAC configuration 
+14. Supporting and Non-Supporting Use Cases — What Are the Limits of Your Architecture? 
+What they are really asking: Be honest — what does your design handle well, what does it not handle, and what would break it? 
+What the Architecture Supports Well 
+Use Case 
+Supported? 
+Notes
+Daily batch ingestion from JDBC/API sources 
+■ Yes 
+Core design
+Incremental loads with watermark 
+■ Yes 
+Tested up to 5M rows/day
+Multiple source formats (CSV, JSON, Parquet, XML)
+■ Yes 
+Metadata-driven parser
+Schema evolution (add columns) 
+■ Yes 
+mergeSchema = true
+SCD Type 1 and Type 2 
+■ Yes 
+Implemented in Silver
+Re-run and idempotency 
+■ Yes 
+MERGE + partition overwrite
+Data quality checks and quarantine 
+■ Yes 
+Silver layer + rejected_records table
+RBAC and PII masking 
+■ Yes 
+Managed Identity + SHA-256 hashing
+
+
+
+ Page 13 
+Scenario-Based Questions in Projects DataArchitectStudio 
+Use Case 
+Supported? 
+Notes
+Auto-scaling for volume spikes 
+■ Yes 
+4–12 workers
+Up to ~50 source tables 
+■ Yes 
+Metadata-driven — no per-table code
+
+
+
+What the Architecture Does NOT Support 
+Use Case 
+Supported? 
+Issue
+Real-time / sub-minute latency 
+■ No 
+Batch-only — would need Kafka + Streaming 
+Hard delete detection from source 
+■ No 
+Watermark CDC cannot see deleted rows 
+More than ~200 concurrent JDBC connections
+■■ Partial 
+Source DB connection limit becomes a bottleneck 
+Processing 1,000 tables 
+simultaneously
+■■ Partial 
+Databricks Workflow has task limits — would need a meta-orchestrator layer 
+Cross-cloud data sources (AWS S3 + Azure)
+■■ Partial 
+Works but adds latency and egress cost 
+Unstructured data (PDFs, images, audio)
+
+
+Designed for 
+structured/semi-structured only
+Sub-second query SLAs on Gold 
+
+
+Needs a serving layer (e.g., Synapse, Cosmos DB) for that
+
+
+
+On the "1,000 tables" question specifically: 
+Our metadata-driven design means adding a new table does not require new code — just a new row in the config table. But Databricks Workflows has limits on tasks per job (currently 10,000 tasks per run, but with scheduling and parallelism constraints). For 1,000 tables, we would split into multiple logical workflow groups (e.g., by domain or by source system), each running their own workflow. The ingestion framework already supports this via the domain parameter in the config table. 
+15. What Optimisations Did You Perform in the Project? 
+What they are really asking: Did you just build it and forget it, or did you actively make it better over time? 
+Key Points to Cover 
+• Performance optimisations (query speed, job duration) 
+• Cost optimisations (compute, storage) 
+• Reliability optimisations (retry logic, idempotency) 
+• Developer experience optimisations (faster debugging, better logging) 
+Example Answer 
+Scenario-Based Questions in Projects DataArchitectStudio 
+Optimisation was an ongoing activity, not a one-time task. Here are the most impactful ones. Performance — Partitioned MERGE: 
+Three months after go-live, our Gold MERGE operations were taking 45 minutes because they were scanning the entire table. We added a date partition filter to the MERGE condition — WHEN sale_date = current_date(). Job time dropped from 45 minutes to 8 minutes. No schema or logic change needed. 
+Performance — Small file compaction: 
+Queries from analysts were slow because Spark was opening thousands of file handles. We added a weekly OPTIMIZE job on all Silver tables using Databricks' built-in OPTIMIZE command with ZORDER BY (store_id, product_id). Query times from Power BI improved by 60%. 
+Cost — Spot instances for workers: 
+We switched worker nodes from on-demand to Azure Spot instances. This reduced compute cost by approximately 60% for worker nodes. We kept the driver on on-demand to avoid job failure if the driver gets preempted. Total compute cost dropped by ~40%. 
+Cost — Job cluster instead of all-purpose cluster: 
+Initially we ran everything on an all-purpose cluster that stayed up 24/7. We switched to Job Clusters — they spin up fresh per run and terminate after. This eliminated ~18 hours of idle cluster time per day. 
+Reliability — Idempotent writes: 
+Early versions used INSERT INTO for Gold writes. After a re-run caused duplicate records, we migrated all Gold writes to MERGE INTO with business key deduplication. Re-runs are now completely safe. 
+Reliability — Parallel ingestion: 
+Originally the three ingestion jobs ran sequentially (POS → ERP → CRM). We refactored the Databricks Workflow to run them in parallel. End-to-end pipeline time dropped from 3.5 hours to 1.8 hours — staying well within the 7 AM SLA. 
+Developer experience — Structured audit logging: 
+Early on, debugging a failure meant reading raw Spark logs — painful and slow. We added structured JSON logging to a Delta audit table. Now any failure can be diagnosed in under 5 minutes by querying SELECT * FROM control.pipeline_audit_log WHERE status = 'FAILED' ORDER BY start_time DESC LIMIT 10. 
+Use these answers as a starting point — adapt the specific numbers, tools, and scenarios to match your actual project experience. 
+ Page 15 
+
