@@ -378,3 +378,383 @@ That sounds architect-level.
 ---
 
 # If you'd like, I can also give you **PySpark JDBC interview code explanation**, **Glue JDBC best practices**, or **how Spark calculates lowerBound upperBound numPartitions internally** next.
+# Exact PySpark JDBC Code + Glue JDBC + Performance Tuning
+
+I’ll give you all three in interview style:
+
+1. Exact PySpark JDBC code with line-by-line explanation
+2. AWS Glue DynamicFrame JDBC examples
+3. Oracle vs SQL Server JDBC tuning points
+
+No code blocks — readable format.
+
+---
+
+# 1. Exact PySpark JDBC Code With Line-by-Line Explanation
+
+## Scenario
+
+Read sales_transactions table from SQL Server into Spark.
+
+---
+
+## Example PySpark JDBC Read
+
+df = spark.read.format("jdbc")
+
+.option("url", "jdbc:sqlserver://host:1433;databaseName=salesdb")
+
+.option("dbtable", "sales_transactions")
+
+.option("user", "etl_user")
+
+.option("password", secret_password)
+
+.option("driver", "com.microsoft.sqlserver.jdbc.SQLServerDriver")
+
+.load()
+
+---
+
+# Line by Line Meaning
+
+## df = spark.read.format("jdbc")
+
+Tells Spark:
+
+Use JDBC connector to read from database.
+
+---
+
+## option url
+
+Connection string to database server.
+
+Includes:
+
+* host name
+* port
+* database name
+
+Example:
+
+server host + SQL Server database salesdb
+
+---
+
+## option dbtable
+
+Which source table to read.
+
+Example:
+
+sales_transactions
+
+Can also use subquery.
+
+---
+
+## option user / password
+
+Login credentials.
+
+In real projects password comes from:
+
+AWS Secrets Manager
+
+Not hardcoded.
+
+---
+
+## option driver
+
+JDBC driver class.
+
+For SQL Server:
+
+com.microsoft.sqlserver.jdbc.SQLServerDriver
+
+For Oracle:
+
+oracle.jdbc.OracleDriver
+
+---
+
+## load()
+
+Actually opens connection and starts reading.
+
+---
+
+# Better Version for Large Tables
+
+df = spark.read.format("jdbc")
+
+.option("url", jdbc_url)
+
+.option("dbtable", "sales_transactions")
+
+.option("user", user)
+
+.option("password", pwd)
+
+.option("partitionColumn", "transaction_id")
+
+.option("lowerBound", "1")
+
+.option("upperBound", "10000000")
+
+.option("numPartitions", "10")
+
+.option("fetchsize", "10000")
+
+.load()
+
+---
+
+# Extra Explanation
+
+## partitionColumn
+
+Column Spark uses to split data.
+
+Example:
+
+transaction_id
+
+---
+
+## lowerBound upperBound
+
+Approximate min/max values.
+
+Used to create ranges.
+
+---
+
+## numPartitions
+
+10 parallel reads / 10 JDBC tasks.
+
+---
+
+## fetchsize
+
+Rows fetched per network round trip.
+
+Higher value usually faster.
+
+---
+
+# Interview Answer
+
+For large JDBC tables, I use partitioned reads with partitionColumn, lowerBound, upperBound, and numPartitions to parallelize extraction, plus fetchsize tuning to reduce network overhead.
+
+---
+
+# 2. AWS Glue DynamicFrame JDBC Example
+
+Glue often uses DynamicFrames instead of DataFrames.
+
+---
+
+# Example Read from Oracle
+
+datasource = glueContext.create_dynamic_frame.from_options
+
+connection_type = "oracle"
+
+connection_options:
+
+url = jdbc oracle thin connection
+
+dbtable = SALES_TRANSACTIONS
+
+user = username
+
+password = secret
+
+---
+
+# Meaning
+
+Glue connects directly to Oracle and creates DynamicFrame.
+
+DynamicFrame is AWS Glue abstraction over Spark data.
+
+Useful for schema drift and ETL transforms.
+
+---
+
+# Example Convert to DataFrame
+
+df = datasource.toDF()
+
+Why?
+
+Use Spark SQL / PySpark transformations.
+
+Then convert back if needed.
+
+---
+
+# Example Write to S3
+
+glueContext.write_dynamic_frame.from_options
+
+connection_type = "s3"
+
+path = s3 curated bucket
+
+format = parquet
+
+---
+
+# Interview Tip
+
+Say:
+
+I often read JDBC using DynamicFrame for Glue-native integration, then convert to Spark DataFrame for advanced joins and transformations.
+
+That sounds experienced.
+
+---
+
+# 3. JDBC Performance Tuning: Oracle vs SQL Server
+
+This is excellent senior-level topic.
+
+---
+
+# A. Oracle JDBC Tuning
+
+Use Oracle thin driver.
+
+Common issues:
+
+* expensive full scans
+* redo/archive pressure
+* source CPU sensitivity
+
+## Best Practices
+
+### Use Predicate Pushdown
+
+Filter by date or watermark.
+
+Only read needed rows.
+
+### Use Indexed Partition Column
+
+transaction_id or updated_at
+
+### Control Parallel Connections
+
+Too many JDBC sessions can hurt Oracle.
+
+### Read During Low Usage Window
+
+Coordinate with DBA.
+
+### Fetch Size Tune
+
+Often 5000 to 10000 useful.
+
+---
+
+# Oracle Interview Line
+
+For Oracle, I prioritize indexed predicate pushdown and controlled concurrency because too many parallel JDBC reads can stress production workloads.
+
+---
+
+# B. SQL Server JDBC Tuning
+
+Common strengths:
+
+* handles parallel reads well
+* rowstore / clustered indexes useful
+
+## Best Practices
+
+### Use Numeric Partition Column
+
+identity column ideal.
+
+### Snapshot Isolation If Needed
+
+Avoid blocking reads.
+
+### Read Replica If Available
+
+Offload OLTP server.
+
+### Fetch Size Tune
+
+Good gains possible.
+
+### Monitor TempDB / Locks
+
+Large reads can affect DB.
+
+---
+
+# SQL Server Interview Line
+
+For SQL Server, I use identity-based partition reads, pushdown filters, and where possible read replicas to reduce impact on OLTP systems.
+
+---
+
+# Important Comparison
+
+## Oracle
+
+More careful with connection count.
+
+## SQL Server
+
+Often easier parallel extraction, but watch locks.
+
+---
+
+# Real Senior Scenario Answer
+
+For a 200 million row Oracle source, I used updated_at watermark plus 8 controlled parallel partitions to protect the source. For SQL Server transactional data, I used identity-column partitioning with 16 parallel reads after DBA benchmarking.
+
+---
+
+# Common Interview Mistakes
+
+## Mistake 1
+
+Using 100 partitions blindly.
+
+## Mistake 2
+
+No fetch size tuning.
+
+## Mistake 3
+
+Reading full table daily.
+
+## Mistake 4
+
+Ignoring source DB load.
+
+---
+
+# What Interviewer Wants to Hear
+
+I tune based on both Spark performance and source database capacity.
+
+That is architect mindset.
+
+---
+
+# One-Line Memory Trick
+
+Fast JDBC = parallel enough for Spark, gentle enough for database.
+
+---
+
+# If you'd like, next I can give you **Top 20 JDBC PySpark interview questions with answers**, **Glue JDBC real production architecture**, or **How Spark generates SQL predicates internally for JDBC partitions**.
