@@ -1,0 +1,380 @@
+# What Are Different Strategies to Read JDBC or Tabular Data?
+
+## What Interviewer Is Really Asking
+
+They are asking:
+
+If source is:
+
+* Oracle Corporation
+* Microsoft
+* IBM
+* MySQL
+* Any relational database
+
+Do you simply read entire table blindly?
+
+Or do you know how to read **efficiently, in parallel, incrementally, and safely**?
+
+That is the real question.
+
+---
+
+# First Understand JDBC Read Problem
+
+Suppose source table has:
+
+100 million rows
+
+If Spark uses one connection and reads sequentially:
+
+* Very slow
+* Source DB overloaded
+* Long network transfer
+* Poor SLA
+
+Need better strategy.
+
+---
+
+# What Is JDBC?
+
+JDBC means Java Database Connectivity.
+
+Spark uses JDBC driver to connect to databases.
+
+Your Glue / EMR / Databricks Spark job can read source tables using JDBC.
+
+---
+
+# Main Strategies
+
+---
+
+# Strategy 1: Single Partition Read
+
+## What It Means
+
+One JDBC connection.
+
+One task reads all rows.
+
+Good for:
+
+* Small lookup tables
+* Config tables
+* 50K rows tables
+
+Example:
+
+store_master table.
+
+---
+
+## Why Not Good for Large Tables?
+
+If sales table has 20 million rows:
+
+One executor becomes bottleneck.
+
+No parallelism.
+
+Slow.
+
+---
+
+# Strategy 2: Multi-Partition Read (Best for Large Tables)
+
+## What It Means
+
+Split table into ranges.
+
+Spark opens multiple parallel JDBC connections.
+
+Each connection reads one portion.
+
+---
+
+## Example
+
+transaction_id from 1 to 10,000,000
+
+Use 10 partitions.
+
+Then reads become:
+
+1 to 1M
+1M to 2M
+2M to 3M
+...
+9M to 10M
+
+10 Spark tasks run together.
+
+Much faster.
+
+---
+
+## Good Partition Columns
+
+Use columns like:
+
+* numeric primary key
+* transaction_id
+* customer_id
+* date column (carefully)
+
+Need balanced distribution.
+
+---
+
+## Bad Partition Columns
+
+Gender column:
+
+Male / Female
+
+Only 2 values.
+
+Bad parallelism.
+
+---
+
+# Strategy 3: Predicate Pushdown
+
+## What It Means
+
+Filter inside database before sending data to Spark.
+
+Wrong way:
+
+Read full 3 years sales table, then filter January in Spark.
+
+Correct way:
+
+Database returns only January rows.
+
+---
+
+## Example
+
+Need April 27 sales only.
+
+Push filter:
+
+transaction_date = April 27
+
+Then only required rows travel over network.
+
+Huge improvement.
+
+---
+
+# Strategy 4: Incremental Read Instead of Full Read
+
+## What It Means
+
+Read only changed rows.
+
+Use:
+
+* updated_at
+* transaction_date
+* ID watermark
+
+Example:
+
+Yesterday max ID = 5000
+
+Today read rows greater than 5000.
+
+---
+
+## Why Powerful?
+
+As source table grows to 5 TB, daily read remains small.
+
+Very scalable.
+
+---
+
+# Strategy 5: Fetch Size Tuning
+
+## Problem
+
+Driver may fetch tiny batches.
+
+Example:
+
+10 rows per round trip.
+
+Then millions of network trips happen.
+
+---
+
+## Better
+
+Increase fetch size.
+
+Example:
+
+10,000 rows per batch.
+
+Less round trips.
+
+Faster transfer.
+
+---
+
+# Strategy 6: Read from Views or Stored Logic
+
+## Example
+
+Need join of customer + region + active accounts.
+
+Instead of pulling 3 raw tables into Spark:
+
+Create DB view.
+
+Read already-joined result.
+
+Use source DB optimizer where useful.
+
+---
+
+## Good When
+
+* Source DB handles joins efficiently
+* Need business-certified logic
+
+---
+
+# Strategy 7: Connection / Driver Tuning
+
+Need correct JDBC driver.
+
+Examples:
+
+* Oracle thin driver
+* SQL Server JDBC driver
+
+Also tune:
+
+* connection timeout
+* retries
+* SSL settings
+
+---
+
+# AWS Glue / EMR Example
+
+Suppose reading Oracle sales data into Amazon S3 using AWS Glue.
+
+For small store_master:
+
+Single read acceptable.
+
+For transactions:
+
+Use partitioned JDBC read on transaction_id with 20 partitions.
+
+Use predicate pushdown for daily date filter.
+
+Use watermark for incremental load.
+
+---
+
+# How To Choose Strategy
+
+## Small Table (< 100K rows)
+
+Single read.
+
+## Medium / Large Table
+
+Partitioned parallel read.
+
+## Daily Loads
+
+Incremental + pushdown.
+
+## Heavy Logic
+
+View or source-side SQL.
+
+---
+
+# Important Warning (Senior-Level)
+
+Too many partitions means too many DB connections.
+
+Example:
+
+200 partitions = 200 connections.
+
+Source DB may suffer.
+
+Always coordinate with DBA.
+
+---
+
+# Interview Ready Answer
+
+There are multiple JDBC read strategies depending on table size and source capacity.
+
+For small reference tables, a single-partition read is fine.
+
+For large tables, I use multi-partition JDBC reads with a suitable partition column and controlled parallelism so Spark can read ranges concurrently.
+
+I also use predicate pushdown so filters execute in the source database, reducing network transfer.
+
+For recurring loads, I prefer incremental reads using watermark columns instead of full extraction.
+
+Additionally, I tune fetch size, connection retries, and JDBC drivers for stability and throughput.
+
+The final design balances Spark performance with source database impact.
+
+---
+
+# Strong Keywords to Use
+
+* Parallel JDBC reads
+* partitionColumn
+* numPartitions
+* Predicate pushdown
+* Incremental extraction
+* Fetch size tuning
+* Source DB protection
+* Balanced partitioning
+* Connection throttling
+
+---
+
+# Trap Question
+
+## Why not always use 100 partitions?
+
+Good answer:
+
+More partitions increase parallelism but also open more database connections. Too many can overload the source system, so I size partitions based on DB capacity and data volume.
+
+---
+
+# One-Line Memory Trick
+
+JDBC tuning = read more rows using fewer trips with safe parallelism.
+
+---
+
+# For Your Interviews
+
+Since you’re senior, always mention both sides:
+
+* Spark performance
+* Source database impact
+
+That sounds architect-level.
+
+---
+
+# If you'd like, I can also give you **PySpark JDBC interview code explanation**, **Glue JDBC best practices**, or **how Spark calculates lowerBound upperBound numPartitions internally** next.
